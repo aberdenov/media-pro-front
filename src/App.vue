@@ -20,7 +20,14 @@ const meta = ref({ total: 0 })
 const pagination = ref({ total: 0, current_page: 1, last_page: 1 })
 const query = ref(isCatalogPage ? catalogParams.get('q') || '' : '')
 const initialCategory = catalogParams.get('category')
-const category = ref(isCatalogPage && Object.hasOwn(icons, initialCategory) ? initialCategory : '')
+const category = ref(isCatalogPage && !query.value.trim() && Object.hasOwn(icons, initialCategory) ? initialCategory : '')
+const searchInput = computed({
+  get: () => query.value,
+  set: value => {
+    query.value = value
+    if (value.trim()) category.value = ''
+  },
+})
 const provider = ref('')
 const inStock = ref(false)
 const maxPrice = ref('')
@@ -87,6 +94,10 @@ async function openProduct(p) {
 function openCart() { success.value = ''; submitError.value = ''; mobileMenu.value = false; cartDialog.value.showModal() }
 function openRequest(message = '') { if (message) form.value.message = message; openCart() }
 function resetFilters() { query.value = ''; category.value = ''; provider.value = ''; inStock.value = false; maxPrice.value = ''; sort.value = 'recommended' }
+function selectCategory(slug) {
+  query.value = ''
+  category.value = slug
+}
 function changePage(page) { loadCatalog(page); document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' }) }
 function goCatalog(cat = '') {
   category.value = cat; mobileMenu.value = false
@@ -124,12 +135,16 @@ async function loadCatalog(page = 1) {
   } catch (e) { if (e.name !== 'AbortError') catalogError.value = e.message }
   finally { if (!signal.aborted) loading.value = false }
 }
-watch([category, provider, inStock, maxPrice, sort], () => { if (section.value === 'catalog') loadCatalog() })
-watch(query, () => {
+watch([query, category, provider, inStock, maxPrice, sort], ([value], [previousValue]) => {
   clearTimeout(searchTimer)
+  if (value === previousValue || !value.trim()) {
+    if (section.value === 'catalog') loadCatalog()
+    return
+  }
+
   searchTimer = setTimeout(() => {
-    if (section.value !== 'catalog' && query.value.trim()) window.location.assign(`/catalog/?q=${encodeURIComponent(query.value.trim().slice(0, 150))}`)
-    else if (section.value === 'catalog') loadCatalog()
+    if (section.value === 'catalog') loadCatalog()
+    else window.location.assign(`/catalog/?q=${encodeURIComponent(value.trim().slice(0, 150))}`)
   }, 350)
 })
 async function initialize() {
@@ -186,8 +201,8 @@ onUnmounted(() => { controller?.abort(); clearTimeout(searchTimer); clearTimeout
         <div v-if="section !== 'home'" class="breadcrumbs"><a href="/">Главная</a><ChevronRight :size="13" /><span>{{ section === 'favorites' ? 'Избранное' : 'Каталог' }}</span></div>
         <div class="section-heading catalog-heading"><div><span class="section-kicker">{{ section === 'favorites' ? 'ТО, ЧТО ВАМ ПОНРАВИЛОСЬ' : section === 'catalog' ? 'ПОДАРКИ, КОТОРЫЕ РАБОТАЮТ НА ВАШ БРЕНД' : 'ДЛЯ РАБОТЫ. ДЛЯ ЖИЗНИ. ДЛЯ ВАШЕГО БРЕНДА.' }}</span><component :is="section === 'home' ? 'h2' : 'h1'">{{ section === 'favorites' ? 'Ваше избранное' : section === 'catalog' ? 'Каталог корпоративных подарков и мерча' : 'Маленькие вещи. Большое впечатление.' }}<sup v-if="section === 'catalog'">{{ formatNumber(meta.total) }}</sup></component></div><a v-if="section === 'home'" href="/catalog/" class="text-link">Посмотреть всё <ArrowUpRight :size="18" /></a></div>
         <template v-if="section === 'catalog'">
-          <div class="catalog-search"><Search :size="21" /><input v-model="query" aria-label="Поиск по названию или артикулу" placeholder="Что подарим? Название, идея или артикул…" /><button v-if="query" class="icon-button" aria-label="Очистить поиск" @click="query = ''"><X :size="18" /></button><span class="search-hint">Найдём то самое</span></div>
-          <div class="catalog-toolbar"><div class="category-tabs"><button :class="{ active: !category }" @click="category = ''">Все товары</button><button v-for="c in categories" :key="c.slug" :class="{ active: category === c.slug }" @click="category = c.slug">{{ c.name }}</button></div><div class="catalog-controls"><button class="filter-toggle" :class="{ active: filterOpen }" @click="filterOpen = !filterOpen"><SlidersHorizontal :size="16" /> Фильтры <b v-if="filterCount">{{ filterCount }}</b></button><span class="results-count">{{ formatNumber(pagination.total) }} товаров</span><label class="sort-select"><span class="sr-only">Сортировка</span><select v-model="sort"><option value="recommended">Рекомендуем</option><option value="price_asc">Сначала дешевле</option><option value="price_desc">Сначала дороже</option><option value="newest">Недавно добавлены</option></select><ChevronDown :size="15" /></label></div></div>
+          <div class="catalog-search"><Search :size="21" /><input v-model="searchInput" aria-label="Поиск по названию или артикулу" placeholder="Что подарим? Название, идея или артикул…" /><button v-if="query" class="icon-button" aria-label="Очистить поиск" @click="query = ''"><X :size="18" /></button><span class="search-hint">Найдём то самое</span></div>
+          <div class="catalog-toolbar"><div class="category-tabs"><button :class="{ active: !category }" @click="category = ''">Все товары</button><button v-for="c in categories" :key="c.slug" :class="{ active: category === c.slug }" @click="selectCategory(c.slug)">{{ c.name }}</button></div><div class="catalog-controls"><button class="filter-toggle" :class="{ active: filterOpen }" @click="filterOpen = !filterOpen"><SlidersHorizontal :size="16" /> Фильтры <b v-if="filterCount">{{ filterCount }}</b></button><span class="results-count">{{ formatNumber(pagination.total) }} товаров</span><label class="sort-select"><span class="sr-only">Сортировка</span><select v-model="sort"><option value="recommended">Рекомендуем</option><option value="price_asc">Сначала дешевле</option><option value="price_desc">Сначала дороже</option><option value="newest">Недавно добавлены</option></select><ChevronDown :size="15" /></label></div></div>
           <div v-if="filterOpen" class="filter-panel"><label>Коллекция<select v-model="provider"><option value="">Все коллекции</option><option value="oasis">Oasis</option><option value="arte">Arte Gifts</option></select></label><label>Цена до, ₸<input v-model="maxPrice" type="number" min="0" placeholder="Без ограничений" /></label><label class="checkbox-label"><input v-model="inStock" type="checkbox" /> Только в наличии</label><button class="text-link" @click="resetFilters">Сбросить фильтры <X :size="14" /></button></div>
         </template>
         <div v-if="loading" class="product-grid" aria-label="Загрузка товаров" aria-busy="true"><div v-for="i in 8" :key="i" class="skeleton-card"><div></div><span></span><span></span></div></div>
