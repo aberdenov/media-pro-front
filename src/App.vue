@@ -3,20 +3,24 @@ import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { ArrowUpRight, ArrowRight, ArrowLeft, Search, Heart, ShoppingBag, Menu, X, ChevronDown, ChevronRight, SlidersHorizontal, Check, Plus, Minus, Trash2, LoaderCircle, Gift, Shirt, Backpack, Coffee, Laptop, NotebookPen, Plane, Sparkles, Phone, PackageCheck, Palette, Truck, Image as ImageIcon } from 'lucide-vue-next'
 import ProductCard from './components/ProductCard.vue'
 import { api } from './api'
+import { dealerPriceLimit, formatMoney, formatRetailPrice, retailPriceInTiyn } from './pricing'
 
 const icons = { drinkware: Coffee, apparel: Shirt, bags: Backpack, office: NotebookPen, tech: Laptop, sets: Gift, leisure: Plane, accessories: Sparkles }
 const readStorage = (key, fallback) => { try { return JSON.parse(localStorage.getItem(key)) ?? fallback } catch { return fallback } }
 const cart = ref(readStorage('mediapro-cart', []).filter(x => Number.isInteger(x.id) && Number.isInteger(x.quantity) && x.quantity > 0))
 const favorites = ref(readStorage('mediapro-favorites', []).filter(x => Number.isInteger(x.id)))
-const section = ref('home')
+const isCatalogPage = /^\/catalog(?:\/index\.html|\/)?$/.test(window.location.pathname)
+const catalogParams = new URLSearchParams(window.location.search)
+const section = ref(isCatalogPage ? 'catalog' : 'home')
 const mobileMenu = ref(false)
 const categories = ref([])
 const featured = ref([])
 const products = ref([])
 const meta = ref({ total: 0 })
 const pagination = ref({ total: 0, current_page: 1, last_page: 1 })
-const query = ref('')
-const category = ref('')
+const query = ref(isCatalogPage ? catalogParams.get('q') || '' : '')
+const initialCategory = catalogParams.get('category')
+const category = ref(isCatalogPage && Object.hasOwn(icons, initialCategory) ? initialCategory : '')
 const provider = ref('')
 const inStock = ref(false)
 const maxPrice = ref('')
@@ -28,6 +32,17 @@ const filterOpen = ref(false)
 const toast = ref('')
 const activeProduct = ref(null)
 const selectedImage = ref(0)
+const failedDetailImages = ref(new Set())
+const detailImages = computed(() => (activeProduct.value?.images ?? []).filter(image => !failedDetailImages.value.has(image)))
+const detailImage = computed(() => detailImages.value[selectedImage.value])
+
+function markDetailImageFailed(image) {
+  if (failedDetailImages.value.has(image)) return
+  const failedIndex = detailImages.value.indexOf(image)
+  failedDetailImages.value.add(image)
+  if (failedIndex >= 0 && failedIndex < selectedImage.value) selectedImage.value--
+  selectedImage.value = Math.min(selectedImage.value, Math.max(0, detailImages.value.length - 1))
+}
 const productDialog = ref(null)
 const cartDialog = ref(null)
 const privacyDialog = ref(null)
@@ -36,9 +51,8 @@ const submitting = ref(false)
 const submitError = ref('')
 const success = ref('')
 const cartCount = computed(() => cart.value.length)
-const cartTotal = computed(() => cart.value.reduce((sum, p) => sum + (Number(p.price) || 0) * p.quantity, 0))
+const cartTotal = computed(() => cart.value.reduce((sum, p) => sum + retailPriceInTiyn(p.price) * p.quantity, 0))
 const hasUnknownPrice = computed(() => cart.value.some(p => p.price === null))
-const money = (value) => value === null ? 'Цена по запросу' : `${new Intl.NumberFormat('ru-KZ', { maximumFractionDigits: 0 }).format(value)} ₸`
 const formatNumber = value => new Intl.NumberFormat('ru-KZ').format(value)
 const heroProducts = computed(() => ['drinkware', 'bags', 'office'].map(cat => featured.value.find(p => p.category === cat)).filter(Boolean))
 const displayed = computed(() => section.value === 'favorites' ? favorites.value : section.value === 'catalog' ? products.value : featured.value)
@@ -62,6 +76,7 @@ function add(p) {
   notify('Товар добавлен в вашу подборку')
 }
 async function openProduct(p) {
+  failedDetailImages.value = new Set()
   activeProduct.value = p; selectedImage.value = 0
   await nextTick(); productDialog.value.showModal()
   try {
@@ -76,12 +91,16 @@ function changePage(page) { loadCatalog(page); document.getElementById('catalog'
 function goCatalog(cat = '') {
   category.value = cat; mobileMenu.value = false
   if (section.value === 'catalog') loadCatalog()
-  else { window.location.hash = 'catalog' }
+  else { window.location.assign(cat ? `/catalog/?category=${encodeURIComponent(cat)}` : '/catalog/') }
   nextTick(() => document.getElementById('catalog')?.scrollIntoView({ behavior: 'smooth' }))
 }
 function onHash() {
   const hash = window.location.hash.slice(1)
-  section.value = hash.startsWith('catalog') ? 'catalog' : hash === 'favorites' ? 'favorites' : 'home'
+  if (!isCatalogPage && hash === 'catalog') {
+    window.location.replace('/catalog/')
+    return
+  }
+  section.value = hash === 'favorites' ? 'favorites' : isCatalogPage ? 'catalog' : 'home'
   mobileMenu.value = false
   if (section.value === 'catalog') loadCatalog()
   nextTick(() => {
@@ -98,7 +117,7 @@ async function loadCatalog(page = 1) {
   if (category.value) params.set('category', category.value)
   if (provider.value) params.set('provider', provider.value)
   if (inStock.value) params.set('in_stock', '1')
-  if (maxPrice.value !== '' && Number(maxPrice.value) >= 0) params.set('max_price', maxPrice.value)
+  if (maxPrice.value !== '' && Number(maxPrice.value) >= 0) params.set('max_price', dealerPriceLimit(maxPrice.value))
   try {
     const result = await api(`/products?${params}`, { signal })
     products.value = result.data; pagination.value = result.meta
@@ -109,7 +128,7 @@ watch([category, provider, inStock, maxPrice, sort], () => { if (section.value =
 watch(query, () => {
   clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
-    if (section.value !== 'catalog' && query.value.trim()) window.location.hash = 'catalog'
+    if (section.value !== 'catalog' && query.value.trim()) window.location.assign(`/catalog/?q=${encodeURIComponent(query.value.trim().slice(0, 150))}`)
     else if (section.value === 'catalog') loadCatalog()
   }, 350)
 })
@@ -139,17 +158,17 @@ onUnmounted(() => { controller?.abort(); clearTimeout(searchTimer); clearTimeout
     <div class="topbar"><div class="container topbar-inner"><span>Мерч, который становится частью жизни</span><a href="tel:+77073544719">Казахстан <span class="topbar-dot">·</span> +7 (707) 354-47-19 <ArrowUpRight :size="13" /></a></div></div>
     <header class="site-header">
       <div class="container header-inner">
-        <a class="logo" href="#" aria-label="MEDIAPRO — главная">MEDIA<span>PRO</span><i>®</i></a>
-        <nav class="desktop-nav" aria-label="Основная навигация"><a href="#catalog" :class="{ active: section === 'catalog' }">Каталог <ChevronDown :size="13" /></a><a href="#branding">Нанесение</a><a href="#about">О нас</a><a href="#contacts">Контакты</a></nav>
-        <div class="header-actions"><a class="icon-button favorite-link" href="#favorites" aria-label="Избранное"><Heart :size="21" /><span v-if="favorites.length" class="counter">{{ favorites.length }}</span></a><button class="cart-button" @click="openCart"><ShoppingBag :size="19" /><span>Моя подборка</span><b>{{ cartCount }}</b></button><button class="icon-button mobile-menu-button" aria-label="Открыть меню" :aria-expanded="mobileMenu" @click="mobileMenu = !mobileMenu"><X v-if="mobileMenu" /><Menu v-else /></button></div>
+        <a class="logo" href="/" aria-label="MEDIAPRO — главная">MEDIA<span>PRO</span><i>®</i></a>
+        <nav class="desktop-nav" aria-label="Основная навигация"><a href="/catalog/" :class="{ active: section === 'catalog' }">Каталог <ChevronDown :size="13" /></a><a href="/#branding">Нанесение</a><a href="/#about">О нас</a><a href="/#contacts">Контакты</a></nav>
+        <div class="header-actions"><a class="icon-button favorite-link" href="/#favorites" aria-label="Избранное"><Heart :size="21" /><span v-if="favorites.length" class="counter">{{ favorites.length }}</span></a><button class="cart-button" @click="openCart"><ShoppingBag :size="19" /><span>Моя подборка</span><b>{{ cartCount }}</b></button><button class="icon-button mobile-menu-button" aria-label="Открыть меню" :aria-expanded="mobileMenu" @click="mobileMenu = !mobileMenu"><X v-if="mobileMenu" /><Menu v-else /></button></div>
       </div>
-      <nav v-if="mobileMenu" class="mobile-nav" aria-label="Мобильная навигация"><a href="#catalog">Каталог</a><a href="#branding">Нанесение</a><a href="#about">О нас</a><a href="#contacts">Контакты</a><a href="#favorites">Избранное</a></nav>
+      <nav v-if="mobileMenu" class="mobile-nav" aria-label="Мобильная навигация"><a href="/catalog/">Каталог</a><a href="/#branding">Нанесение</a><a href="/#about">О нас</a><a href="/#contacts">Контакты</a><a href="/#favorites">Избранное</a></nav>
     </header>
 
     <main>
       <template v-if="section === 'home'">
         <section class="hero container">
-          <div class="hero-copy"><div class="eyebrow"><span></span> КОРПОРАТИВНЫЕ ПОДАРКИ И МЕРЧ</div><h1>Не просто дарить.<br />Оставлять<br /><em>впечатление.</em></h1><p>Подарки с характером вашего бренда.<br />Для тех, кого вы цените.</p><a class="button button-lime" href="#catalog">Найти свой мерч <ArrowUpRight :size="20" /></a><div class="hero-footnote"><span class="tiny-star">✳</span> Вещи, которыми хочется пользоваться</div></div>
+          <div class="hero-copy"><div class="eyebrow"><span></span> КОРПОРАТИВНЫЕ ПОДАРКИ И МЕРЧ</div><h1>Не просто дарить.<br />Оставлять<br /><em>впечатление.</em></h1><p>Подарки с характером вашего бренда.<br />Для тех, кого вы цените.</p><a class="button button-lime" href="/catalog/">Найти свой мерч <ArrowUpRight :size="20" /></a><div class="hero-footnote"><span class="tiny-star">✳</span> Вещи, которыми хочется пользоваться</div></div>
           <div class="hero-art" aria-label="Идеи корпоративных подарков">
             <div class="art-orbit orbit-one"></div><div class="art-orbit orbit-two"></div><span class="art-caption">THOUGHTFUL GIFTS.<br />LASTING IMPRESSIONS.</span><div class="art-spark">✳</div>
             <div class="brand-paper"><span>made to<br /><b>be remembered.</b></span><span class="paper-logo">MEDIAPRO</span></div>
@@ -160,12 +179,12 @@ onUnmounted(() => { controller?.abort(); clearTimeout(searchTimer); clearTimeout
         </section>
         <div class="container benefits-strip"><div><Palette :size="22" /><span>Нанесение вашего логотипа</span></div><div><Gift :size="22" /><span>От промоподарка до welcome pack</span></div><div><PackageCheck :size="22" /><span>Подбор под задачу и бюджет</span></div><div><Truck :size="22" /><span>Для бизнеса в Казахстане</span></div></div>
 
-        <section class="container categories-section"><div class="section-heading"><div><span class="section-kicker">НАЙДИТЕ СВОЁ</span><h2>Хороший подарок начинается с идеи</h2></div><a class="text-link" href="#catalog">Весь каталог <ArrowUpRight :size="18" /></a></div><div class="category-grid"><button v-for="c in categories" :key="c.slug" class="category-card" @click="goCatalog(c.slug)"><span class="category-icon"><component :is="icons[c.slug]" :size="31" :stroke-width="1.3" /></span><span>{{ c.name }}</span><small>{{ formatNumber(c.count) }} товаров</small><ArrowUpRight class="category-arrow" :size="16" /></button></div><div v-if="initError" class="error-box">{{ initError }} <button @click="initialize">Обновить каталог</button></div></section>
+        <section class="container categories-section"><div class="section-heading"><div><span class="section-kicker">НАЙДИТЕ СВОЁ</span><h2>Хороший подарок начинается с идеи</h2></div><a class="text-link" href="/catalog/">Весь каталог <ArrowUpRight :size="18" /></a></div><div class="category-grid"><button v-for="c in categories" :key="c.slug" class="category-card" @click="goCatalog(c.slug)"><span class="category-icon"><component :is="icons[c.slug]" :size="31" :stroke-width="1.3" /></span><span>{{ c.name }}</span><small>{{ formatNumber(c.count) }} товаров</small><ArrowUpRight class="category-arrow" :size="16" /></button></div><div v-if="initError" class="error-box">{{ initError }} <button @click="initialize">Обновить каталог</button></div></section>
       </template>
 
       <section id="catalog" class="container catalog-section" :class="{ 'full-catalog': section !== 'home' }">
-        <div v-if="section !== 'home'" class="breadcrumbs"><a href="#">Главная</a><ChevronRight :size="13" /><span>{{ section === 'favorites' ? 'Избранное' : 'Каталог' }}</span></div>
-        <div class="section-heading catalog-heading"><div><span class="section-kicker">{{ section === 'favorites' ? 'ТО, ЧТО ВАМ ПОНРАВИЛОСЬ' : section === 'catalog' ? 'ПОДАРКИ, КОТОРЫЕ РАБОТАЮТ НА ВАШ БРЕНД' : 'ДЛЯ РАБОТЫ. ДЛЯ ЖИЗНИ. ДЛЯ ВАШЕГО БРЕНДА.' }}</span><h2>{{ section === 'favorites' ? 'Ваше избранное' : section === 'catalog' ? 'Каталог подарков и мерча' : 'Маленькие вещи. Большое впечатление.' }}<sup v-if="section === 'catalog'">{{ formatNumber(meta.total) }}</sup></h2></div><a v-if="section === 'home'" href="#catalog" class="text-link">Посмотреть всё <ArrowUpRight :size="18" /></a></div>
+        <div v-if="section !== 'home'" class="breadcrumbs"><a href="/">Главная</a><ChevronRight :size="13" /><span>{{ section === 'favorites' ? 'Избранное' : 'Каталог' }}</span></div>
+        <div class="section-heading catalog-heading"><div><span class="section-kicker">{{ section === 'favorites' ? 'ТО, ЧТО ВАМ ПОНРАВИЛОСЬ' : section === 'catalog' ? 'ПОДАРКИ, КОТОРЫЕ РАБОТАЮТ НА ВАШ БРЕНД' : 'ДЛЯ РАБОТЫ. ДЛЯ ЖИЗНИ. ДЛЯ ВАШЕГО БРЕНДА.' }}</span><component :is="section === 'home' ? 'h2' : 'h1'">{{ section === 'favorites' ? 'Ваше избранное' : section === 'catalog' ? 'Каталог корпоративных подарков и мерча' : 'Маленькие вещи. Большое впечатление.' }}<sup v-if="section === 'catalog'">{{ formatNumber(meta.total) }}</sup></component></div><a v-if="section === 'home'" href="/catalog/" class="text-link">Посмотреть всё <ArrowUpRight :size="18" /></a></div>
         <template v-if="section === 'catalog'">
           <div class="catalog-search"><Search :size="21" /><input v-model="query" aria-label="Поиск по названию или артикулу" placeholder="Что подарим? Название, идея или артикул…" /><button v-if="query" class="icon-button" aria-label="Очистить поиск" @click="query = ''"><X :size="18" /></button><span class="search-hint">Найдём то самое</span></div>
           <div class="catalog-toolbar"><div class="category-tabs"><button :class="{ active: !category }" @click="category = ''">Все товары</button><button v-for="c in categories" :key="c.slug" :class="{ active: category === c.slug }" @click="category = c.slug">{{ c.name }}</button></div><div class="catalog-controls"><button class="filter-toggle" :class="{ active: filterOpen }" @click="filterOpen = !filterOpen"><SlidersHorizontal :size="16" /> Фильтры <b v-if="filterCount">{{ filterCount }}</b></button><span class="results-count">{{ formatNumber(pagination.total) }} товаров</span><label class="sort-select"><span class="sr-only">Сортировка</span><select v-model="sort"><option value="recommended">Рекомендуем</option><option value="price_asc">Сначала дешевле</option><option value="price_desc">Сначала дороже</option><option value="newest">Недавно добавлены</option></select><ChevronDown :size="15" /></label></div></div>
@@ -176,7 +195,7 @@ onUnmounted(() => { controller?.abort(); clearTimeout(searchTimer); clearTimeout
         <div v-else-if="displayed.length" class="product-grid"><ProductCard v-for="p in displayed" :key="p.id" :product="p" :saved="isSaved(p)" :selected="isSelected(p)" @open="openProduct" @save="save" @add="add" /></div>
         <div v-else class="empty-state"><Heart v-if="section === 'favorites'" :size="40" /><Search v-else :size="40" /><h3>{{ section === 'favorites' ? 'Здесь будут ваши любимые идеи' : 'Пока ничего не нашли' }}</h3><p>{{ section === 'favorites' ? 'Нажмите на сердечко у товара, чтобы вернуться к нему позже.' : 'Попробуйте другое название или измените фильтры. Мы всегда можем помочь с подбором.' }}</p><button class="button button-dark" @click="section === 'favorites' ? goCatalog() : resetFilters()">{{ section === 'favorites' ? 'Посмотреть каталог' : 'Сбросить фильтры' }}</button></div>
         <div v-if="section === 'catalog' && !loading && pagination.last_page > 1" class="pagination"><button :disabled="pagination.current_page <= 1" aria-label="Предыдущая страница" @click="changePage(pagination.current_page - 1)"><ArrowLeft :size="18" /></button><span>{{ pagination.current_page }} <small>из {{ pagination.last_page }}</small></span><button :disabled="pagination.current_page >= pagination.last_page" aria-label="Следующая страница" @click="changePage(pagination.current_page + 1)"><ArrowRight :size="18" /></button></div>
-        <div v-if="section === 'home' && featured.length" class="catalog-footer"><span>Это только начало вашей истории.</span><a class="button button-outline" href="#catalog">Ещё больше идей <ArrowUpRight :size="18" /></a></div>
+        <div v-if="section === 'home' && featured.length" class="catalog-footer"><span>Это только начало вашей истории.</span><a class="button button-outline" href="/catalog/">Ещё больше идей <ArrowUpRight :size="18" /></a></div>
         <p v-if="displayed.length" class="price-note">Цены указаны за товар без нанесения. Итоговую стоимость, наличие и сроки подтвердим при расчёте заказа.</p>
       </section>
 
@@ -188,11 +207,11 @@ onUnmounted(() => { controller?.abort(); clearTimeout(searchTimer); clearTimeout
 
       <section id="contacts" class="contact-section"><div class="container contact-inner"><div><span class="section-kicker">ДАВАЙТЕ СОЗДАДИМ ЧТО-ТО ЗАПОМИНАЮЩЕЕСЯ</span><h2>Есть идея?<br />Давайте <em>подарим ей форму.</em></h2><p>Расскажите, для кого выбираете подарок.<br />Остальное придумаем вместе.</p><button class="button button-lime" @click="openRequest()">Обсудить проект <ArrowUpRight :size="19" /></button></div><div class="contact-details"><span>ПОЗВОНИТЕ НАМ</span><a href="tel:+77073544719">+7 (707) 354-47-19 <ArrowUpRight :size="25" /></a><a href="tel:+77018317825">+7 (701) 831-78-25 <ArrowUpRight :size="25" /></a><a class="whatsapp-link" href="https://wa.me/77073544719" target="_blank" rel="noopener noreferrer">Или напишите в WhatsApp <ArrowUpRight :size="16" /></a><div class="contact-star">✳</div></div></div></section>
     </main>
-    <footer class="site-footer container"><div class="footer-top"><a class="logo" href="#">MEDIA<span>PRO</span><i>®</i></a><span>Не просто дарить. Оставлять впечатление.</span><a href="#catalog">Каталог <ArrowUpRight :size="15" /></a></div><div class="footer-bottom"><span>© {{ new Date().getFullYear() }} MEDIAPRO. Казахстан.</span><button @click="privacyDialog.showModal()">Обработка персональных данных</button><span>Подарки с характером вашего бренда</span></div></footer>
+    <footer class="site-footer container"><div class="footer-top"><a class="logo" href="/">MEDIA<span>PRO</span><i>®</i></a><span>Не просто дарить. Оставлять впечатление.</span><a href="/catalog/">Каталог <ArrowUpRight :size="15" /></a></div><div class="footer-bottom"><span>© {{ new Date().getFullYear() }} MEDIAPRO. Казахстан.</span><button @click="privacyDialog.showModal()">Обработка персональных данных</button><span>Подарки с характером вашего бренда</span></div></footer>
 
-    <dialog ref="productDialog" class="product-dialog" aria-labelledby="product-dialog-title" @click="backdrop($event, productDialog)"><div v-if="activeProduct" class="product-dialog-inner"><button class="dialog-close icon-button" aria-label="Закрыть товар" @click="productDialog.close()"><X /></button><div class="detail-gallery"><div class="detail-main-image"><img v-if="activeProduct.images?.length" :src="activeProduct.images[selectedImage]" :alt="activeProduct.name" @error="fallbackImage" /><ImageIcon v-else :size="80" :stroke-width="1" /></div><div v-if="activeProduct.images?.length > 1" class="detail-thumbnails"><button v-for="(image, i) in activeProduct.images.slice(0, 8)" :key="image" :class="{ active: selectedImage === i }" :aria-label="`Фотография ${i + 1}`" @click="selectedImage = i"><img :src="image" alt="" loading="lazy" /></button></div></div><div class="detail-copy"><span class="section-kicker">{{ activeProduct.brand || 'МЕРЧ С ВАШИМ ЛОГОТИПОМ' }}</span><h2 id="product-dialog-title">{{ activeProduct.name }}</h2><span class="detail-article">Артикул {{ activeProduct.article }} · {{ activeProduct.provider === 'oasis' ? 'Oasis' : 'Arte Gifts' }}</span><div class="detail-price">{{ money(activeProduct.price) }}<span>за штуку, без нанесения</span></div><p class="detail-stock"><span :class="{ 'stock-dot': activeProduct.stock > 0 }"></span>{{ activeProduct.stock === null ? 'Наличие уточняйте' : activeProduct.stock > 0 ? `На складе поставщика: ${formatNumber(activeProduct.stock)} шт.` : 'Поставка под заказ — уточните сроки' }}</p><div class="detail-actions"><button class="button button-dark" @click="add(activeProduct)">{{ isSelected(activeProduct) ? 'Открыть подборку' : 'Добавить в подборку' }}<ShoppingBag :size="18" /></button><button class="icon-button detail-heart" :aria-label="isSaved(activeProduct) ? 'Убрать из избранного' : 'В избранное'" @click="save(activeProduct)"><Heart :size="22" :fill="isSaved(activeProduct) ? 'currentColor' : 'none'" /></button></div><p class="detail-description">{{ activeProduct.description }}</p><dl class="detail-attributes"><template v-for="(attr, i) in activeProduct.attributes" :key="i"><dt>{{ attr.name }}</dt><dd>{{ attr.value }}</dd></template></dl><p class="price-note">Итоговую стоимость с нанесением и сроки доставки рассчитаем индивидуально.</p></div></div></dialog>
+    <dialog ref="productDialog" class="product-dialog" aria-labelledby="product-dialog-title" @click="backdrop($event, productDialog)"><div v-if="activeProduct" class="product-dialog-inner"><button class="dialog-close icon-button" aria-label="Закрыть товар" @click="productDialog.close()"><X /></button><div class="detail-gallery"><div class="detail-main-image"><img v-if="detailImage" :key="detailImage" :src="detailImage" :alt="activeProduct.name" @error="markDetailImageFailed(detailImage)" /><ImageIcon v-else :size="80" :stroke-width="1" /></div><div v-if="detailImages.length > 1" class="detail-thumbnails"><button v-for="(image, i) in detailImages" :key="image" :class="{ active: selectedImage === i }" :aria-label="`Фотография ${i + 1}`" @click="selectedImage = i"><img :src="image" alt="" loading="lazy" @error="markDetailImageFailed(image)" /></button></div></div><div class="detail-copy"><span class="section-kicker">{{ activeProduct.brand || 'МЕРЧ С ВАШИМ ЛОГОТИПОМ' }}</span><h2 id="product-dialog-title">{{ activeProduct.name }}</h2><span class="detail-article">Артикул {{ activeProduct.article }} · {{ activeProduct.provider === 'oasis' ? 'Oasis' : 'Arte Gifts' }}</span><div class="detail-price">{{ formatRetailPrice(activeProduct.price) }}<span>за штуку, без нанесения</span></div><p class="detail-stock"><span :class="{ 'stock-dot': activeProduct.stock > 0 }"></span>{{ activeProduct.stock === null ? 'Наличие уточняйте' : activeProduct.stock > 0 ? `На складе поставщика: ${formatNumber(activeProduct.stock)} шт.` : 'Поставка под заказ — уточните сроки' }}</p><div class="detail-actions"><button class="button button-dark" @click="add(activeProduct)">{{ isSelected(activeProduct) ? 'Открыть подборку' : 'Добавить в подборку' }}<ShoppingBag :size="18" /></button><button class="icon-button detail-heart" :aria-label="isSaved(activeProduct) ? 'Убрать из избранного' : 'В избранное'" @click="save(activeProduct)"><Heart :size="22" :fill="isSaved(activeProduct) ? 'currentColor' : 'none'" /></button></div><p class="detail-description">{{ activeProduct.description }}</p><dl class="detail-attributes"><template v-for="(attr, i) in activeProduct.attributes" :key="i"><dt>{{ attr.name }}</dt><dd>{{ attr.value }}</dd></template></dl><p class="price-note">Итоговую стоимость с нанесением и сроки доставки рассчитаем индивидуально.</p></div></div></dialog>
 
-    <dialog ref="cartDialog" class="cart-dialog" aria-labelledby="cart-title" @click="backdrop($event, cartDialog)"><div class="cart-dialog-inner"><div class="drawer-heading"><div><span class="section-kicker">ВАШ БУДУЩИЙ МЕРЧ</span><h2 id="cart-title">{{ success ? 'Начало положено!' : 'Ваша подборка' }}<sup v-if="!success">{{ cartCount }}</sup></h2></div><button class="icon-button" aria-label="Закрыть подборку" @click="cartDialog.close()"><X /></button></div><div v-if="success" class="success-state"><div><Check :size="38" /></div><h3>Спасибо за вашу идею</h3><p>Заявка сохранена. Свяжемся с вами, чтобы уточнить детали и подготовить расчёт.</p><small>Номер заявки: {{ success.slice(0, 8).toUpperCase() }}</small><button class="button button-dark" @click="cartDialog.close()">Продолжить знакомство <ArrowRight :size="18" /></button></div><template v-else><div v-if="cart.length" class="cart-items"><div v-for="p in cart" :key="p.id" class="cart-item"><img :src="p.images?.[0]" :alt="p.name" @error="fallbackImage" /><div class="cart-item-copy"><strong>{{ p.name }}</strong><small>арт. {{ p.article }}</small><div class="quantity-control"><button :disabled="p.quantity <= 1" aria-label="Уменьшить количество" @click="p.quantity--"><Minus :size="13" /></button><input v-model.number="p.quantity" type="number" min="1" max="100000" :aria-label="`Количество ${p.name}`" @change="p.quantity = Math.min(100000, Math.max(1, Math.floor(Number(p.quantity) || 1)))" /><button :disabled="p.quantity >= 100000" aria-label="Увеличить количество" @click="p.quantity++"><Plus :size="13" /></button></div></div><div class="cart-item-right"><button class="icon-button" aria-label="Удалить товар" @click="cart = cart.filter(x => x.id !== p.id)"><Trash2 :size="16" /></button><strong>{{ p.price === null ? 'По запросу' : money(p.price * p.quantity) }}</strong></div></div><div class="cart-summary"><span>{{ hasUnknownPrice ? 'Известная часть стоимости' : 'Предварительная стоимость' }}</span><strong>{{ money(cartTotal) }}</strong></div><p class="price-note">Без нанесения и доставки. Подтвердим цену, наличие и минимальный тираж при расчёте.</p></div><p v-else class="request-intro">Можете добавить товары из каталога или просто рассказать о задаче — поможем подобрать подходящие подарки.</p><form class="inquiry-form" @submit.prevent="submitInquiry"><h3>Обсудим детали?</h3><p>Оставьте контакты, и мы подготовим предложение.</p><label>Как к вам обращаться *<input v-model="form.name" autocomplete="name" required minlength="2" maxlength="120" placeholder="Ваше имя" /></label><div class="form-row"><label>Телефон *<input v-model="form.phone" autocomplete="tel" type="tel" required pattern="\+?[0-9\s\(\)\-]{10,25}" maxlength="25" placeholder="+7 (___) ___-__-__" /></label><label>Email<input v-model="form.email" type="email" autocomplete="email" placeholder="you@company.kz" maxlength="254" /></label></div><label>Компания<input v-model="form.company" autocomplete="organization" placeholder="Название компании" maxlength="200" /></label><label>Пара слов о задаче<textarea v-model="form.message" rows="3" maxlength="5000" placeholder="Для кого подарок, какой тираж, бюджет и сроки?" /></label><label class="honeypot" aria-hidden="true">Сайт<input v-model="form.website" tabindex="-1" autocomplete="off" /></label><label class="consent-label"><input v-model="form.consent" type="checkbox" required /><span>Согласен на <button type="button" @click="privacyDialog.showModal()">обработку персональных данных</button> для ответа на заявку.</span></label><p v-if="submitError" class="form-error" role="alert">{{ submitError }}</p><button class="button button-dark submit-button" :disabled="submitting"><LoaderCircle v-if="submitting" class="spin" :size="18" />{{ submitting ? 'Сохраняем заявку…' : 'Получить предложение' }}<ArrowUpRight v-if="!submitting" :size="18" /></button></form></template></div></dialog>
+    <dialog ref="cartDialog" class="cart-dialog" aria-labelledby="cart-title" @click="backdrop($event, cartDialog)"><div class="cart-dialog-inner"><div class="drawer-heading"><div><span class="section-kicker">ВАШ БУДУЩИЙ МЕРЧ</span><h2 id="cart-title">{{ success ? 'Начало положено!' : 'Ваша подборка' }}<sup v-if="!success">{{ cartCount }}</sup></h2></div><button class="icon-button" aria-label="Закрыть подборку" @click="cartDialog.close()"><X /></button></div><div v-if="success" class="success-state"><div><Check :size="38" /></div><h3>Спасибо за вашу идею</h3><p>Заявка сохранена. Свяжемся с вами, чтобы уточнить детали и подготовить расчёт.</p><small>Номер заявки: {{ success.slice(0, 8).toUpperCase() }}</small><button class="button button-dark" @click="cartDialog.close()">Продолжить знакомство <ArrowRight :size="18" /></button></div><template v-else><div v-if="cart.length" class="cart-items"><div v-for="p in cart" :key="p.id" class="cart-item"><img :src="p.images?.[0]" :alt="p.name" @error="fallbackImage" /><div class="cart-item-copy"><strong>{{ p.name }}</strong><small>арт. {{ p.article }}</small><div class="quantity-control"><button :disabled="p.quantity <= 1" aria-label="Уменьшить количество" @click="p.quantity--"><Minus :size="13" /></button><input v-model.number="p.quantity" type="number" min="1" max="100000" :aria-label="`Количество ${p.name}`" @change="p.quantity = Math.min(100000, Math.max(1, Math.floor(Number(p.quantity) || 1)))" /><button :disabled="p.quantity >= 100000" aria-label="Увеличить количество" @click="p.quantity++"><Plus :size="13" /></button></div></div><div class="cart-item-right"><button class="icon-button" aria-label="Удалить товар" @click="cart = cart.filter(x => x.id !== p.id)"><Trash2 :size="16" /></button><strong>{{ p.price === null ? 'По запросу' : formatMoney(retailPriceInTiyn(p.price) * p.quantity) }}</strong></div></div><div class="cart-summary"><span>{{ hasUnknownPrice ? 'Известная часть стоимости' : 'Предварительная стоимость' }}</span><strong>{{ formatMoney(cartTotal) }}</strong></div><p class="price-note">Без нанесения и доставки. Подтвердим цену, наличие и минимальный тираж при расчёте.</p></div><p v-else class="request-intro">Можете добавить товары из каталога или просто рассказать о задаче — поможем подобрать подходящие подарки.</p><form class="inquiry-form" @submit.prevent="submitInquiry"><h3>Обсудим детали?</h3><p>Оставьте контакты, и мы подготовим предложение.</p><label>Как к вам обращаться *<input v-model="form.name" autocomplete="name" required minlength="2" maxlength="120" placeholder="Ваше имя" /></label><div class="form-row"><label>Телефон *<input v-model="form.phone" autocomplete="tel" type="tel" required pattern="\+?[0-9\s\(\)\-]{10,25}" maxlength="25" placeholder="+7 (___) ___-__-__" /></label><label>Email<input v-model="form.email" type="email" autocomplete="email" placeholder="you@company.kz" maxlength="254" /></label></div><label>Компания<input v-model="form.company" autocomplete="organization" placeholder="Название компании" maxlength="200" /></label><label>Пара слов о задаче<textarea v-model="form.message" rows="3" maxlength="5000" placeholder="Для кого подарок, какой тираж, бюджет и сроки?" /></label><label class="honeypot" aria-hidden="true">Сайт<input v-model="form.website" tabindex="-1" autocomplete="off" /></label><label class="consent-label"><input v-model="form.consent" type="checkbox" required /><span>Согласен на <button type="button" @click="privacyDialog.showModal()">обработку персональных данных</button> для ответа на заявку.</span></label><p v-if="submitError" class="form-error" role="alert">{{ submitError }}</p><button class="button button-dark submit-button" :disabled="submitting"><LoaderCircle v-if="submitting" class="spin" :size="18" />{{ submitting ? 'Сохраняем заявку…' : 'Получить предложение' }}<ArrowUpRight v-if="!submitting" :size="18" /></button></form></template></div></dialog>
 
     <dialog ref="privacyDialog" class="privacy-dialog" aria-labelledby="privacy-title" @click="backdrop($event, privacyDialog)"><div><button class="dialog-close icon-button" aria-label="Закрыть" @click="privacyDialog.close()"><X /></button><span class="section-kicker">MEDIAPRO</span><h2 id="privacy-title">Обработка данных заявки</h2><p>Отправляя заявку, вы разрешаете MEDIAPRO использовать указанные вами имя, телефон, email, название компании и сведения о заказе, чтобы связаться с вами и подготовить предложение.</p><p>Заявка сохраняется на сервере MEDIAPRO. Она не отправляется поставщикам каталогов автоматически. Избранное и подборка хранятся в вашем браузере.</p><p>Чтобы уточнить, изменить или удалить сведения из заявки, свяжитесь с нами по телефону <a href="tel:+77073544719">+7 (707) 354-47-19</a> и сообщите номер заявки.</p><button class="button button-dark" @click="privacyDialog.close()">Понятно <Check :size="17" /></button></div></dialog>
     <Transition name="toast"><div v-if="toast" class="toast-message" role="status"><Check :size="18" />{{ toast }}</div></Transition>
